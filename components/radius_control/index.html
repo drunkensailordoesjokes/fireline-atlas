@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: sans-serif;
+        --text: #31333f;
+        --input: #ffffff;
+        --border: #c8ccd3;
+        --primary: #ff4b4b;
+        --button: #f0f2f6;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        color: var(--text);
+        background: transparent;
+        font-size: 14px;
+      }
+
+      .control {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 2.5rem 2.5rem;
+        gap: 0.35rem;
+        align-items: center;
+        width: 100%;
+      }
+
+      input, button {
+        height: 2.5rem;
+        border: 1px solid var(--border);
+        border-radius: 0.45rem;
+        font: inherit;
+      }
+
+      input {
+        width: 100%;
+        min-width: 0;
+        padding: 0 0.65rem;
+        color: var(--text);
+        background: var(--input);
+      }
+
+      button {
+        display: grid;
+        place-items: center;
+        padding: 0;
+        color: var(--text);
+        background: var(--button);
+        font-size: 1.25rem;
+        font-weight: 600;
+        cursor: pointer;
+        touch-action: none;
+        user-select: none;
+      }
+
+      input:focus-visible, button:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 1px;
+      }
+
+      button:active { filter: brightness(0.92); }
+    </style>
+  </head>
+  <body>
+    <div class="control">
+      <input id="radius" type="number" min="0.1" max="20015" step="0.1"
+        aria-label="Search radius in kilometers" />
+      <button id="decrease" type="button" aria-label="Decrease search radius by 1 kilometer" title="Hold to decrease by 1 km at a time">−</button>
+      <button id="increase" type="button" aria-label="Increase search radius by 1 kilometer" title="Hold to increase by 1 km at a time">+</button>
+    </div>
+    <script>
+      const input = document.getElementById("radius");
+      const minButton = document.getElementById("decrease");
+      const maxButton = document.getElementById("increase");
+      let minimum = 0.1;
+      let maximum = 20015.0;
+      let current = 100.0;
+      let lastSent = current;
+      let edited = false;
+      let holding = false;
+      let changedWhileHeld = false;
+      let holdDelay = null;
+      let holdInterval = null;
+      let suppressClickUntil = 0;
+
+      function postToStreamlit(type, data = {}) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type,
+          ...data,
+        }, "*");
+      }
+
+      function normalize(value) {
+        return Math.min(maximum, Math.max(minimum, Math.round(value * 10) / 10));
+      }
+
+      function display(value) {
+        return String(Number(value.toFixed(1)));
+      }
+
+      function setCurrent(value) {
+        current = normalize(value);
+        input.value = display(current);
+        edited = false;
+      }
+
+      function commit() {
+        const value = Number(input.value);
+        if (input.value.trim() === "" || !Number.isFinite(value)) {
+          input.value = display(current);
+          edited = false;
+          return;
+        }
+        setCurrent(value);
+        if (current !== lastSent) {
+          lastSent = current;
+          postToStreamlit("streamlit:setComponentValue", {
+            value: current,
+            dataType: "json",
+          });
+        }
+      }
+
+      function readEditedInput() {
+        if (!edited) return;
+        const value = Number(input.value);
+        if (input.value.trim() !== "" && Number.isFinite(value)) {
+          current = normalize(value);
+        }
+        input.value = display(current);
+        edited = false;
+      }
+
+      function adjust(direction) {
+        readEditedInput();
+        const next = normalize(current + direction);
+        if (next === current) return false;
+        setCurrent(next);
+        return true;
+      }
+
+      function startHold(event, direction) {
+        if (event.button !== undefined && event.button !== 0) return;
+        event.preventDefault();
+        if (holding) return;
+        holding = true;
+        changedWhileHeld = adjust(direction);
+        suppressClickUntil = performance.now() + 800;
+
+        holdDelay = window.setTimeout(() => {
+          holdInterval = window.setInterval(() => {
+            if (adjust(direction)) changedWhileHeld = true;
+          }, 100);
+        }, 350);
+      }
+
+      function stopHold() {
+        if (!holding) return;
+        holding = false;
+        window.clearTimeout(holdDelay);
+        window.clearInterval(holdInterval);
+        holdDelay = null;
+        holdInterval = null;
+        if (changedWhileHeld) commit();
+        changedWhileHeld = false;
+      }
+
+      function addButtonHandlers(button, direction) {
+        button.addEventListener("pointerdown", (event) => startHold(event, direction));
+        button.addEventListener("click", (event) => {
+          if (event.detail > 0 && performance.now() < suppressClickUntil) {
+            event.preventDefault();
+            return;
+          }
+          if (adjust(direction)) commit();
+        });
+      }
+
+      addButtonHandlers(minButton, -1);
+      addButtonHandlers(maxButton, 1);
+      document.addEventListener("pointerup", stopHold);
+      document.addEventListener("pointercancel", stopHold);
+      window.addEventListener("blur", stopHold);
+
+      input.addEventListener("input", () => { edited = true; });
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+          input.blur();
+        }
+      });
+
+      window.addEventListener("message", (event) => {
+        const message = event.data;
+        if (!message || message.type !== "streamlit:render") return;
+        const args = message.args || {};
+        minimum = Number(args.min_value ?? minimum);
+        maximum = Number(args.max_value ?? maximum);
+        input.min = String(minimum);
+        input.max = String(maximum);
+        input.step = "0.1";
+
+        const theme = message.theme || {};
+        document.documentElement.style.colorScheme = theme.base === "dark" ? "dark" : "light";
+        if (theme.textColor) document.documentElement.style.setProperty("--text", theme.textColor);
+        if (theme.backgroundColor) document.documentElement.style.setProperty("--input", theme.backgroundColor);
+        if (theme.secondaryBackgroundColor) document.documentElement.style.setProperty("--button", theme.secondaryBackgroundColor);
+        if (theme.primaryColor) document.documentElement.style.setProperty("--primary", theme.primaryColor);
+        if (theme.textColor && theme.base === "dark") document.documentElement.style.setProperty("--border", "#5c6068");
+
+        if (!holding && !edited && Number.isFinite(Number(args.value))) {
+          setCurrent(Number(args.value));
+          lastSent = current;
+        }
+        postToStreamlit("streamlit:setFrameHeight", { height: 48 });
+      });
+
+      postToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+      postToStreamlit("streamlit:setFrameHeight", { height: 48 });
+    </script>
+  </body>
+</html>
